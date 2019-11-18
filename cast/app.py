@@ -57,6 +57,21 @@ jwt = JWTManager(app)
 socketio = flask_socketio.SocketIO(app)
 
 
+def update_session_logger(data):
+    app.config["current_session"] = data["session_id"]
+    log = Logging(app.config["current_session"])
+    return log
+
+
+def write_input(file_descriptor, data, log):
+    if file_descriptor:
+        if data["input"] == "":
+            os.write(file_descriptor, b"\x00")
+        else:
+            log.write_log(data["input"])
+            os.write(file_descriptor, data["input"].encode())
+
+
 def read_and_forward_pty_output(session_id):
     max_read_bytes = 1024 * 2
     app.config["current_session"] = session_id
@@ -155,15 +170,9 @@ def new_session(data=None):
 
         print("new-session: child pid is", child_pid)
         print(
-            "new-session: starting background task with command `{}` to continously read "
-            "and forward pty output to client".format(cmd)
-        )
-        """
-        print(
             f"new-session: starting background task with command `{cmd}` to continously read "
             "and forward pty output to client"
         )
-        """
 
         socketio.start_background_task(
             target=read_and_forward_pty_output, session_id=session_id
@@ -181,65 +190,28 @@ def connect(data=None):
     )
     if session_id == "" and data is not None:
         session_id = data["session_id"]
-        print("connect: {}\n".format(session_id))
+        print(f"connect: {session_id}\n")
 
     # Create new session only when id not in records
     if session_id in app.config["sessions"]:
         return
 
-    (child_pid, fd) = pty.fork()
+    (child_pid) = pty.fork()
 
+    # child: start system command
     if child_pid == 0:
-        # child: start system command
         subprocess.run(app.config["cmd"])
     else:
-        # parent: print info, stream child input/output to socketio
-        # Store sessions by ssid
-        print("opening a new session")
-        app.config["sessions"] = {}
-        app.config["sessions"][session_id] = {}
-        app.config["sessions"][session_id]["fd"] = fd
-        app.config["sessions"][session_id]["child_pid"] = child_pid
-
-        cmd = " ".join(shlex.quote(c) for c in app.config["cmd"])
-
-        print("connect: child pid is", child_pid)
-        print(
-            "connect: starting background task with command `{}` to continously read "
-            "and forward pty output to client".format(cmd)
-        )
-        """
-        print(
-            f"new-session: starting background task with command `{cmd}` to continously read "
-            "and forward pty output to client"
-        )
-        """
-
-        # Output terminal message corresponding to ssid
-        socketio.start_background_task(
-            target=read_and_forward_pty_output, session_id=session_id
-        )
-
+        new_session(data={"session_id": session_id})
         print("connect: task started")
 
 
 @socketio.on("client-input", namespace="/cast")
 def client_input(data):
-    # Update current session
-    app.config["current_session"] = data["session_id"]
-    print("input: {}".format(app.config["sessions"]))
-    log = Logging(app.config["current_session"])
-
+    log = update_session_logger(data)
     if data["session_id"] in app.config["sessions"]:
         file_desc = app.config["sessions"][data["session_id"]]["fd"]
-
-        if file_desc:
-            if data["input"] == "":
-                # When switching sessions, send a key to update terminal content
-                os.write(file_desc, b"\x00")
-            else:
-                log.write_log(data["input"])
-                os.write(file_desc, data["input"].encode())
+        write_input(file_desc, data, log)
 
 
 # This is the route handler for DOWNLOADING the log file. Maybe a bit buggy. Please report if found
@@ -290,7 +262,7 @@ def main():
         app.config["passwd"] = args.password
 
     app.config["cmd"] = [args.command] + shlex.split(args.cmd_args)
-    print("serving on http://0.0.0.0:{}".format(args.port))
+    print(f"serving on http://0.0.0.0:{args.port}")
     socketio.run(app, host="0.0.0.0", debug=args.debug, port=args.port)
 
 
